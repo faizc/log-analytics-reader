@@ -1,0 +1,5 @@
+azure-monitor-query>=1.2.0
+azure-identity>=1.15.0
+pandas>=2.0.0
+python-dotenv>=1.0.0
+tqdm>=4.66.0
