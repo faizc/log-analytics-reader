@@ -248,9 +248,9 @@ class LogAnalyticsChunkedReader:
             if response.status == LogsQueryStatus.SUCCESS:
                 self.console_logger.info("Workspace connection validated successfully")
                 return True
-            elif response.status == LogsQueryStatus.PARTIAL:
-                self.console_logger.warning("Workspace returned partial results, but connection is valid")
-                return True
+            #elif response.status == LogsQueryStatus.PARTIAL:
+            #    self.console_logger.warning("Workspace returned partial results, but connection is valid")
+            #    return True
             else:
                 error_msg = f"Workspace query failed with status: {response.status}"
                 self.console_logger.error(error_msg)
@@ -345,9 +345,18 @@ class LogAnalyticsChunkedReader:
         
         Logic:
         - If start_date/end_date are provided, use them
-        - Otherwise, query the table for min/max dates
-        - If table min_date is more recent than DAYS_TO_QUERY ago, use table min_date
-        - If table min_date is older than DAYS_TO_QUERY ago, use DAYS_TO_QUERY
+        - Otherwise, calculate the allowed query window based on current date:
+          - query_window_start = current_date - DAYS_TO_QUERY
+          - query_window_end = current_date
+        - Query the table for min/max dates
+        - Final start_date = MAX(table_min, query_window_start)
+        - Final end_date = MIN(table_max, query_window_end)
+        
+        This ensures:
+        - We don't query before the allowed DAYS_TO_QUERY window
+        - We don't query before data exists in the table
+        - We don't query beyond the current date
+        - We don't query beyond the available data in the table
         
         Args:
             start_date: Optional explicit start date
@@ -363,35 +372,49 @@ class LogAnalyticsChunkedReader:
         # Get min/max from table first (this will raise WorkspaceConnectionError if it fails)
         table_min, table_max = self.get_time_range_from_table()
         
-        # Default end date is current time (to capture all recent data)
-        if end_date is None:
-            now = datetime.utcnow()
-            # Use table_max if available, otherwise use current time
-            # This ensures we capture all data in the table
-            if table_max is not None:
-                end_date = table_max
-                self.console_logger.info(f"Using table max date ({table_max}) as end date.")
+        # Calculate the allowed query window based on current date
+        now = datetime.utcnow()
+        query_window_start = now - timedelta(days=self.config.days_to_query)
+        query_window_end = now
+        
+        self.console_logger.info(f"Current date: {now}")
+        self.console_logger.info(f"Allowed query window: {query_window_start} to {query_window_end}")
+        self.console_logger.info(f"Table data range: {table_min} to {table_max}")
+        
+        # Determine start_date: MAX(table_min, query_window_start)
+        # Don't query before data exists OR before the allowed window
+        if start_date is None:
+            if table_min > query_window_start:
+                start_date = table_min
+                self.console_logger.info(
+                    f"Table min date ({table_min}) is more recent than query window start ({query_window_start}). "
+                    f"Starting from table min date."
+                )
             else:
-                end_date = now
+                start_date = query_window_start
+                self.console_logger.info(
+                    f"Table min date ({table_min}) is older than query window start ({query_window_start}). "
+                    f"Starting from query window start (current_date - {self.config.days_to_query} days)."
+                )
         
-        # Calculate the DAYS_TO_QUERY boundary
-        days_to_query_start = end_date - timedelta(days=self.config.days_to_query)
+        # Determine end_date: MIN(table_max, query_window_end)
+        # Don't query beyond available data OR beyond current date
+        if end_date is None:
+            if table_max < query_window_end:
+                end_date = table_max
+                self.console_logger.info(
+                    f"Table max date ({table_max}) is earlier than current date ({query_window_end}). "
+                    f"Ending at table max date."
+                )
+            else:
+                end_date = query_window_end
+                self.console_logger.info(
+                    f"Table max date ({table_max}) is at or beyond current date ({query_window_end}). "
+                    f"Ending at current date."
+                )
         
-        print(f'table_min: {table_min}, table_max: {table_max} days_to_query_start : {days_to_query_start}')
-        # If table min is more recent than DAYS_TO_QUERY ago, start from table min
-        if table_min > days_to_query_start:
-            self.console_logger.info(
-                f"Table min date ({table_min}) is more recent than {self.config.days_to_query} days ago. "
-                f"Starting from table min date."
-            )
-            start_date = table_min
-        else:
-            # Table has older data, but we only want DAYS_TO_QUERY
-            self.console_logger.info(
-                f"Table min date ({table_min}) is older than {self.config.days_to_query} days ago. "
-                f"Starting from {self.config.days_to_query} days ago."
-            )
-            start_date = days_to_query_start
+        print(f'table_min: {table_min}, table_max: {table_max}, query_window_start: {query_window_start}, query_window_end: {query_window_end}')
+        print(f'Final range: start_date: {start_date}, end_date: {end_date}')
         
         return start_date, end_date
     
