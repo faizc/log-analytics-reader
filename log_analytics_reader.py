@@ -72,12 +72,14 @@ class QueryConfig:
     def from_env(cls) -> "QueryConfig":
         """Create config from environment variables."""
         additional_filter = os.getenv("ADDITIONAL_FILTER")
+        columns = os.getenv("COLUMNS")
         return cls(
             workspace_id=os.getenv("LOG_ANALYTICS_WORKSPACE_ID", ""),
             table_name=os.getenv("QUERY_TABLE_NAME", ""),
             days_to_query=int(os.getenv("DAYS_TO_QUERY", "90")),
             chunk_seconds=int(os.getenv("CHUNK_SECONDS", "30")),
             additional_filter=additional_filter if additional_filter else None,
+            columns=columns.split(",") if columns else None,
             max_threads=int(os.getenv("MAX_THREADS", "5")),
             output_dir=os.getenv("OUTPUT_DIR", "./output"),
             log_file=os.getenv("LOG_FILE", "./query_log.csv"),
