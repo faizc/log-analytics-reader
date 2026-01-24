@@ -702,7 +702,7 @@ class LogAnalyticsChunkedReader:
                         table = response.partial_data[0]
                         df = pd.DataFrame(
                             data=table.rows,
-                            columns=[col.name for col in table.columns]
+                            columns=table.columns
                         )
                         record_count = len(df)
                         
