@@ -15,6 +15,10 @@ import os
 import logging
 import threading
 import glob
+import base64
+import gzip
+import io
+import re
 from datetime import datetime, timedelta
 from typing import Generator, Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
@@ -33,6 +37,59 @@ load_dotenv()
 # Thread-safe lock for file operations
 file_lock = threading.Lock()
 log_lock = threading.Lock()
+
+
+def decompress_gzip_base64(s: str) -> str:
+    """
+    Decompress a gzip-compressed, base64-encoded string.
+    
+    This is the reverse of the KQL function gzip_compress_to_base64_string().
+    
+    Args:
+        s: Base64-encoded gzip-compressed string
+        
+    Returns:
+        Original decompressed string, or None if input is None/empty
+    """
+    if s is None or (isinstance(s, str) and not s.strip()):
+        return None
+    try:
+        raw = base64.b64decode(s)
+        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode='rb') as f:
+            return f.read().decode('utf-8')
+    except Exception:
+        # Return original value if decompression fails
+        return s
+
+
+def decompress_dataframe_columns(
+    df: pd.DataFrame, 
+    compressed_columns: Dict[str, str]
+) -> pd.DataFrame:
+    """
+    Decompress specified columns in a DataFrame and optionally rename them.
+    
+    Args:
+        df: DataFrame with compressed columns
+        compressed_columns: Dict mapping compressed column name to original column name
+                           e.g., {"SyslogMessage_base64": "SyslogMessage"}
+    
+    Returns:
+        DataFrame with decompressed and renamed columns
+    """
+    if not compressed_columns:
+        return df
+    
+    df = df.copy()
+    
+    for compressed_col, original_col in compressed_columns.items():
+        if compressed_col in df.columns:
+            # Decompress the column
+            df[compressed_col] = df[compressed_col].apply(decompress_gzip_base64)
+            # Rename to original column name
+            df.rename(columns={compressed_col: original_col}, inplace=True)
+    
+    return df
 
 
 class WorkspaceConnectionError(Exception):
@@ -67,12 +124,14 @@ class QueryConfig:
     max_threads: int = 5
     output_dir: str = "./output"
     log_file: str = "./query_log.csv"
+    compressed_columns: Optional[Dict[str, str]] = None  # Maps output column name to original column name
     
     @classmethod
     def from_env(cls) -> "QueryConfig":
         """Create config from environment variables."""
         additional_filter = os.getenv("ADDITIONAL_FILTER")
         columns = os.getenv("COLUMNS")
+        compressed_columns = cls._parse_compressed_columns(os.getenv("COMPRESSED_COLUMNS", ""))
         return cls(
             workspace_id=os.getenv("LOG_ANALYTICS_WORKSPACE_ID", ""),
             table_name=os.getenv("QUERY_TABLE_NAME", ""),
@@ -83,7 +142,37 @@ class QueryConfig:
             max_threads=int(os.getenv("MAX_THREADS", "5")),
             output_dir=os.getenv("OUTPUT_DIR", "./output"),
             log_file=os.getenv("LOG_FILE", "./query_log.csv"),
+            compressed_columns=compressed_columns if compressed_columns else None,
         )
+    
+    @staticmethod
+    def _parse_compressed_columns(compressed_columns_str: str) -> Dict[str, str]:
+        """
+        Parse COMPRESSED_COLUMNS configuration string.
+        
+        Format: "OutputCol1=gzip_compress_to_base64_string(OriginalCol1),OutputCol2=gzip_compress_to_base64_string(OriginalCol2)"
+        
+        Returns:
+            Dict mapping output column name to original column name
+        """
+        result = {}
+        if not compressed_columns_str:
+            return result
+        
+        # Pattern: ColName=gzip_compress_to_base64_string(OriginalColName)
+        pattern = r'(\w+)\s*=\s*gzip_compress_to_base64_string\s*\(\s*(\w+)\s*\)'
+        
+        for col_def in compressed_columns_str.split(','):
+            col_def = col_def.strip()
+            if not col_def:
+                continue
+            match = re.match(pattern, col_def)
+            if match:
+                output_col = match.group(1)  # e.g., SyslogMessage_base64
+                original_col = match.group(2)  # e.g., SyslogMessage
+                result[output_col] = original_col
+        
+        return result
 
 
 class QueryLogger:
@@ -658,6 +747,10 @@ class LogAnalyticsChunkedReader:
                         )
                         record_count = len(df)
                         
+                        # Decompress any compressed columns before saving
+                        if self.config.compressed_columns:
+                            df = decompress_dataframe_columns(df, self.config.compressed_columns)
+                        
                         # Save to CSV file
                         if save_to_file:
                             output_file = os.path.join(
@@ -707,6 +800,10 @@ class LogAnalyticsChunkedReader:
                             columns=table.columns
                         )
                         record_count = len(df)
+                        
+                        # Decompress any compressed columns before saving
+                        if self.config.compressed_columns:
+                            df = decompress_dataframe_columns(df, self.config.compressed_columns)
                         
                         if save_to_file:
                             output_file = os.path.join(
