@@ -176,6 +176,58 @@ end = datetime(2025, 12, 31, 23, 59, 59)
 stats = reader.query_to_files_parallel(start_date=start, end_date=end)
 ```
 
+### Handling Large Columns with Compression
+
+When dealing with tables that have very large text columns (e.g., `SyslogMessage`, `LogEntry`, JSON payloads), you may encounter partial data retrieval issues. **Azure Log Analytics has a 64MB response size limit per query** - if the data retrieved even at a 1-second interval exceeds this limit, the response will be truncated, resulting in incomplete data.
+
+#### The Solution: `gzip_compress_to_base64_string`
+
+Use the built-in KQL function `gzip_compress_to_base64_string()` to compress large columns during query execution. This significantly reduces the response size and helps avoid the 64MB limit.
+
+#### Configuration
+
+In your `.env` file, specify columns with compression using the `COLUMNS` setting:
+
+```env
+# Define columns to fetch, with compression for large text columns
+COLUMNS=TimeGenerated, Computer, EventTime, Facility, HostName, SeverityLevel, SyslogMessage_base64=gzip_compress_to_base64_string(SyslogMessage), ProcessID, HostIP, ProcessName, Type, _ResourceId
+
+# Specify which columns need decompression when writing output
+COMPRESSED_COLUMNS=SyslogMessage_base64=gzip_compress_to_base64_string(SyslogMessage)
+```
+
+#### How It Works
+
+1. **Query Phase**: The KQL query uses `gzip_compress_to_base64_string(ColumnName)` to compress the column data on the server side before transmission
+2. **Transfer Phase**: Compressed data (typically 70-90% smaller) is transferred, staying well under the 64MB limit
+3. **Output Phase**: The reader automatically decompresses the data when writing to CSV files
+
+#### Example Scenarios
+
+| Scenario | Without Compression | With Compression |
+|----------|---------------------|------------------|
+| 10,000 rows × 50KB message | ~500MB (FAILS) | ~50-100MB compressed |
+| Syslog with stack traces | Frequent partial data | Complete data retrieval |
+| JSON payloads in logs | 64MB limit hit quickly | 5-10x more data per query |
+
+#### When to Use Compression
+
+- ✅ Tables with large text columns (`SyslogMessage`, `LogEntry`, `Message`, `RawData`)
+- ✅ JSON or XML data stored in log columns
+- ✅ Stack traces or verbose error messages
+- ✅ When you see "partial" status in query logs frequently
+- ✅ When reducing `CHUNK_SECONDS` to 1 still results in truncated data
+
+#### Syntax Format
+
+```env
+# Format: OutputColumnName=gzip_compress_to_base64_string(OriginalColumnName)
+COLUMNS=..., CompressedCol=gzip_compress_to_base64_string(OriginalCol), ...
+COMPRESSED_COLUMNS=CompressedCol=gzip_compress_to_base64_string(OriginalCol)
+```
+
+> **Note**: The `COMPRESSED_COLUMNS` setting tells the reader which columns to decompress when writing output. If omitted, compressed columns will remain as base64 strings in the output CSV.
+
 ## Output Files
 
 ### Chunk CSV Files
