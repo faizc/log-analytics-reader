@@ -719,151 +719,156 @@ class LogAnalyticsChunkedReader:
         output_file = ""
         record_count = 0
         
-        client = self._get_client()
+        # Create a fresh connection for each query to avoid 30-minute timeout
+        client = LogsQueryClient(self.credential)
         self.console_logger.debug(
             f"Chunk {time_range.chunk_index}: Querying {time_range.start} to {time_range.end} - retry_count:{retry_count} "
         )
         
-        for attempt in range(retry_count):
-            try:
-                # Use tuple of (start, end) to specify exact time range
-                # This ensures we can query data older than 30 days
-                response = client.query_workspace(
-                    workspace_id=self.config.workspace_id,
-                    query=query,
-                    timespan=None  # Rely on WHERE TimeGenerated clauses in query
+        try:
+            for attempt in range(retry_count):
+                try:
+                    # Use tuple of (start, end) to specify exact time range
+                    # This ensures we can query data older than 30 days
+                    response = client.query_workspace(
+                        workspace_id=self.config.workspace_id,
+                        query=query,
+                        timespan=None  # Rely on WHERE TimeGenerated clauses in query
 #                    timespan=(time_range.start, time_range.end)
 #                    timespan=timedelta(days=30)  # Safety timespan
-                )
-                
-                duration = time.time() - start_execution
-                
-                if response.status == LogsQueryStatus.SUCCESS:
-                    if response.tables and len(response.tables[0].rows) > 0:
-                        table = response.tables[0]
-                        df = pd.DataFrame(
-                            data=table.rows,
-                            columns=table.columns
-                        )
-                        record_count = len(df)
-                        
-                        # Decompress any compressed columns before saving
-                        if self.config.compressed_columns:
-                            df = decompress_dataframe_columns(df, self.config.compressed_columns)
-                        
-                        # Save to CSV file
-                        if save_to_file:
-                            output_file = os.path.join(
-                                self.config.output_dir, 
-                                time_range.get_filename()
+                    )
+                    
+                    duration = time.time() - start_execution
+                    
+                    if response.status == LogsQueryStatus.SUCCESS:
+                        if response.tables and len(response.tables[0].rows) > 0:
+                            table = response.tables[0]
+                            df = pd.DataFrame(
+                                data=table.rows,
+                                columns=table.columns
                             )
-                            with file_lock:
-                                df.to_csv(output_file, index=False)
+                            record_count = len(df)
+                            
+                            # Decompress any compressed columns before saving
+                            if self.config.compressed_columns:
+                                df = decompress_dataframe_columns(df, self.config.compressed_columns)
+                            
+                            # Save to CSV file
+                            if save_to_file:
+                                output_file = os.path.join(
+                                    self.config.output_dir, 
+                                    time_range.get_filename()
+                                )
+                                with file_lock:
+                                    df.to_csv(output_file, index=False)
+                            
+                            # Log success
+                            self.logger.log_query(
+                                chunk_index=time_range.chunk_index,
+                                start_time=time_range.start,
+                                end_time=time_range.end,
+                                status="SUCCESS",
+                                record_count=record_count,
+                                output_file=output_file,
+                                duration_seconds=duration
+                            )
+                            
+                            self.console_logger.debug(
+                                f"Chunk {time_range.chunk_index}: SUCCESS - {record_count} records in {duration:.2f}s"
+                            )
+                            
+                            return df, output_file, record_count
                         
-                        # Log success
+                        # No data in this chunk
                         self.logger.log_query(
                             chunk_index=time_range.chunk_index,
                             start_time=time_range.start,
                             end_time=time_range.end,
-                            status="SUCCESS",
-                            record_count=record_count,
-                            output_file=output_file,
+                            status="EMPTY",
+                            record_count=0,
                             duration_seconds=duration
                         )
-                        
                         self.console_logger.debug(
-                            f"Chunk {time_range.chunk_index}: SUCCESS - {record_count} records in {duration:.2f}s"
+                            f"Chunk {time_range.chunk_index}: EMPTY - no data in {duration:.2f}s"
                         )
+                        return None, "", 0
                         
-                        return df, output_file, record_count
-                    
-                    # No data in this chunk
-                    self.logger.log_query(
-                        chunk_index=time_range.chunk_index,
-                        start_time=time_range.start,
-                        end_time=time_range.end,
-                        status="EMPTY",
-                        record_count=0,
-                        duration_seconds=duration
-                    )
-                    self.console_logger.debug(
-                        f"Chunk {time_range.chunk_index}: EMPTY - no data in {duration:.2f}s"
-                    )
-                    return None, "", 0
-                    
-                elif response.status == LogsQueryStatus.PARTIAL:
-                    self.console_logger.warning(f"Partial results for {time_range}")
-                    if response.partial_data:
-                        table = response.partial_data[0]
-                        df = pd.DataFrame(
-                            data=table.rows,
-                            columns=table.columns
-                        )
-                        record_count = len(df)
-                        
-                        # Decompress any compressed columns before saving
-                        if self.config.compressed_columns:
-                            df = decompress_dataframe_columns(df, self.config.compressed_columns)
-                        
-                        if save_to_file:
-                            output_file = os.path.join(
-                                self.config.output_dir, 
-                                time_range.get_filename()
+                    elif response.status == LogsQueryStatus.PARTIAL:
+                        self.console_logger.warning(f"Partial results for {time_range}")
+                        if response.partial_data:
+                            table = response.partial_data[0]
+                            df = pd.DataFrame(
+                                data=table.rows,
+                                columns=table.columns
                             )
-                            with file_lock:
-                                df.to_csv(output_file, index=False)
-                        
+                            record_count = len(df)
+                            
+                            # Decompress any compressed columns before saving
+                            if self.config.compressed_columns:
+                                df = decompress_dataframe_columns(df, self.config.compressed_columns)
+                            
+                            if save_to_file:
+                                output_file = os.path.join(
+                                    self.config.output_dir, 
+                                    time_range.get_filename()
+                                )
+                                with file_lock:
+                                    df.to_csv(output_file, index=False)
+                            
+                            self.logger.log_query(
+                                chunk_index=time_range.chunk_index,
+                                start_time=time_range.start,
+                                end_time=time_range.end,
+                                status="PARTIAL",
+                                record_count=record_count,
+                                output_file=output_file,
+                                duration_seconds=duration
+                            )
+                            
+                            self.console_logger.debug(
+                                f"Chunk {time_range.chunk_index}: PARTIAL - {record_count} records in {duration:.2f}s"
+                            )
+                            
+                            return df, output_file, record_count
+                        return None, "", 0
+                    else:
+                        self.console_logger.error(f"Query failed for {time_range}")
                         self.logger.log_query(
                             chunk_index=time_range.chunk_index,
                             start_time=time_range.start,
                             end_time=time_range.end,
-                            status="PARTIAL",
-                            record_count=record_count,
-                            output_file=output_file,
+                            status="FAILED",
+                            record_count=0,
+                            error_message="Query returned failure status",
                             duration_seconds=duration
                         )
+                        return None, "", 0
                         
-                        self.console_logger.debug(
-                            f"Chunk {time_range.chunk_index}: PARTIAL - {record_count} records in {duration:.2f}s"
+                except Exception as e:
+                    print(f'\n\n chunk_index={time_range.chunk_index} Exception: {e} \n\n')
+                    duration = time.time() - start_execution
+                    if attempt < retry_count - 1:
+                        self.console_logger.warning(
+                            f"Retry {attempt + 1}/{retry_count} for {time_range}: {e}"
                         )
-                        
-                        return df, output_file, record_count
-                    return None, "", 0
-                else:
-                    self.console_logger.error(f"Query failed for {time_range}")
-                    self.logger.log_query(
-                        chunk_index=time_range.chunk_index,
-                        start_time=time_range.start,
-                        end_time=time_range.end,
-                        status="FAILED",
-                        record_count=0,
-                        error_message="Query returned failure status",
-                        duration_seconds=duration
-                    )
-                    return None, "", 0
-                    
-            except Exception as e:
-                print(f'\n\n chunk_index={time_range.chunk_index} Exception: {e} \n\n')
-                duration = time.time() - start_execution
-                if attempt < retry_count - 1:
-                    self.console_logger.warning(
-                        f"Retry {attempt + 1}/{retry_count} for {time_range}: {e}"
-                    )
-                    time.sleep(retry_delay * (attempt + 1))
-                else:
-                    self.console_logger.error(f"Failed after {retry_count} attempts: {e}")
-                    self.logger.log_query(
-                        chunk_index=time_range.chunk_index,
-                        start_time=time_range.start,
-                        end_time=time_range.end,
-                        status="ERROR",
-                        record_count=0,
-                        error_message=str(e),
-                        duration_seconds=duration
-                    )
-                    raise
-        
-        return None, "", 0
+                        time.sleep(retry_delay * (attempt + 1))
+                    else:
+                        self.console_logger.error(f"Failed after {retry_count} attempts: {e}")
+                        self.logger.log_query(
+                            chunk_index=time_range.chunk_index,
+                            start_time=time_range.start,
+                            end_time=time_range.end,
+                            status="ERROR",
+                            record_count=0,
+                            error_message=str(e),
+                            duration_seconds=duration
+                        )
+                        raise
+            
+            return None, "", 0
+        finally:
+            # Close the connection after processing to release resources
+            client.close()
     
     def query_all_chunks(
         self,
