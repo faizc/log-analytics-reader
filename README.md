@@ -2,6 +2,49 @@
 
 A Python utility to read data from Azure Log Analytics tables in small time chunks (e.g., 30-second intervals) over extended periods (e.g., 90 days).
 
+## Why This Utility?
+
+Azure Log Analytics exposes a powerful query API, but it enforces several hard limits that make **bulk data extraction extremely difficult** — especially for customers whose tables contain high-volume, second-level granularity data (e.g., per-second telemetry, syslog streams, IoT sensor readings, or container logs).
+
+### Azure Log Analytics API Limits
+
+| Limit | Value | Impact |
+|-------|-------|--------|
+| **Response size** | **64 MB** per query | A single query returning thousands of rows with large text columns (stack traces, JSON payloads, raw syslog) can easily exceed this, resulting in **partial or truncated** responses. |
+| **Row count** | **500,000 rows** per query | Tables ingesting data every second generate ~86,400 rows/day per source. With multiple sources, a single day's query can blow past this limit. |
+| **Query timeout** | **10 minutes** execution time | Broad time-range queries over billions of rows will time out before completing on the server. |
+| **Request rate** | **~200 requests per 30 seconds** per user | Naively firing thousands of queries in tight loops triggers HTTP 429 throttling and temporary bans. |
+| **Concurrent queries** | Limited per workspace | Too many simultaneous queries cause queuing and failures. |
+
+### The Real-World Problem
+
+Consider a customer with a table that ingests **1,000 rows per second** (common for network firewalls, container platforms, or IoT hubs):
+
+| Time Range | Total Rows | Can Direct API Fetch It? |
+|------------|-----------|--------------------------|
+| 1 hour | 3,600,000 | No — exceeds 500K row limit |
+| 1 day | 86,400,000 | No — far exceeds row and size limits |
+| 90 days | 7,776,000,000 | Absolutely not |
+
+Even reducing the query window to a single minute yields 60,000 rows. If each row contains a large message column (e.g., 5 KB syslog message), that single minute produces **~300 MB of data** — well over the 64 MB response cap.
+
+**Direct API queries simply cannot retrieve this data in any reasonable way.**
+
+### How This Utility Solves It
+
+| Problem | Solution |
+|---------|----------|
+| 64 MB response limit | Breaks time range into tiny chunks (e.g., 30-second or even 1-second windows), keeping each response small. |
+| 500K row limit | Each micro-chunk returns far fewer rows, staying well within limits. |
+| Query timeouts | Small, targeted queries execute in milliseconds, never hitting the 10-minute wall. |
+| API rate limiting | Built-in configurable delays and controlled concurrency (default 5 threads) to stay under throttling thresholds. |
+| Large text columns | Optional server-side gzip compression (`gzip_compress_to_base64_string`) shrinks payloads by 70–90%, with automatic client-side decompression. |
+| Partial / failed responses | Automatic retry logic (3 attempts) with per-chunk status tracking; failed chunks don't block the rest. |
+| Resumability | Already-fetched chunks are detected and skipped on re-run, so interrupted jobs pick up where they left off. |
+| Data assembly | Built-in combine utility merges thousands of chunk files into a single chronological CSV using streaming (very low memory). |
+
+In short, this utility **turns an impossible bulk-export problem into a managed, resumable, parallel pipeline** that respects every API constraint while extracting complete data — even across 90+ days of second-level granularity records.
+
 ## Features
 
 - **Chunked Queries**: Break down large time ranges into small 30-second chunks to avoid query timeouts
